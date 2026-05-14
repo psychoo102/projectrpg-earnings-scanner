@@ -29,8 +29,10 @@ jobs:
     - name: Build for Windows
       run: |
         GOOS=windows GOARCH=amd64 \
-        go build -v -ldflags="-s -w -trimpath" \
-          -o prpg-earning-scanner.exe .
+        go build -v \
+           -trimpath \
+           -ldflags="-s -w" \
+           -o prpg-earning-scanner.exe .
 
     - name: Test
       run: go test -v -race ./...
