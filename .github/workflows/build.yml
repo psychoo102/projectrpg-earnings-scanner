@@ -1,0 +1,65 @@
+name: Go Windows Build & Release
+
+on:
+  push:
+    branches: [ "main" ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.26'
+        cache: true
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Build for Windows
+      run: |
+        GOOS=windows GOARCH=amd64 \
+        go build -v -ldflags="-s -w -trimpath" \
+          -o prpg-earning-scanner.exe .
+
+    - name: Test
+      run: go test -v -race ./...
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: prpg-earning-scanner-windows
+        path: prpg-earning-scanner.exe
+        if-no-files-found: error
+        retention-days: 7
+
+    # ==================== RELEASE ====================
+    - name: Generate SHA256 checksum
+      if: startsWith(github.ref, 'refs/tags/v')
+      run: |
+        sha256sum prpg-earning-scanner.exe > prpg-earning-scanner.exe.sha256
+        echo "Checksum generated:"
+        cat prpg-earning-scanner.exe.sha256
+
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/v')
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          prpg-earning-scanner.exe
+          prpg-earning-scanner.exe.sha256
+        name: Release ${{ github.ref_name }}
+        tag_name: ${{ github.ref_name }}
+        draft: true                    # ← Release jako szkic
+        prerelease: false
+        generate_release_notes: true
