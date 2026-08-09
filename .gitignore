@@ -26,6 +26,7 @@ go.work.sum
 
 # Application generated raport file
 raport.txt
+raport.csv
 
 # Lokalny config wygenerowany podczas developmentu/testów
 # (produkcyjnie config.json trzyma się w %APPDATA%, nie w repo)

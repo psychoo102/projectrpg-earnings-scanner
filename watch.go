@@ -26,8 +26,9 @@ type watchState struct {
 // wykrytym trackerze (np. "Nagroda dzienna").
 //
 // Działa w pętli nieskończonej — zatrzymanie przez Ctrl+C.
-func runWatch(logDir string, stats map[string]*dayStats, trackers []compiledTracker, reportPath string) error {
+func runWatch(logDir string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker, reportPath string) error {
 	states := make(map[string]*watchState)
+	trackerNames := trackerNamesFrom(trackers)
 
 	fmt.Println("Tryb obserwacji uruchomiony (Ctrl+C aby zakończyć).")
 	fmt.Printf("Sprawdzam zmiany w logach co %s...\n\n", watchPollInterval)
@@ -42,7 +43,7 @@ func runWatch(logDir string, stats map[string]*dayStats, trackers []compiledTrac
 
 		anyNewMatch := false
 		for _, f := range files {
-			matched, err := readNewLines(f, states, stats, trackers)
+			matched, err := readNewLines(f, states, stats, moneyRules, trackers)
 			if err != nil {
 				fmt.Printf("Błąd odczytu %s: %v\n", f, err)
 				continue
@@ -53,7 +54,7 @@ func runWatch(logDir string, stats map[string]*dayStats, trackers []compiledTrac
 		}
 
 		if anyNewMatch {
-			if err := writeReport(reportPath, stats); err != nil {
+			if err := writeReport(reportPath, stats, trackerNames); err != nil {
 				fmt.Printf("Błąd zapisu raportu: %v\n", err)
 			} else {
 				fmt.Printf("[%s] raport.txt zaktualizowany\n", time.Now().Format("15:04:05"))
@@ -67,7 +68,7 @@ func runWatch(logDir string, stats map[string]*dayStats, trackers []compiledTrac
 // readNewLines doczytuje fragment pliku, który pojawił się od ostatniego
 // sprawdzenia, i przepuszcza nowe linie przez processLine. Zwraca true,
 // jeśli którakolwiek nowa linia coś dopasowała (zarobek lub tracker).
-func readNewLines(path string, states map[string]*watchState, stats map[string]*dayStats, trackers []compiledTracker) (bool, error) {
+func readNewLines(path string, states map[string]*watchState, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (bool, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return false, err
@@ -108,9 +109,9 @@ func readNewLines(path string, states map[string]*watchState, stats map[string]*
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
-		if processLine(line, stats, trackers) {
+		if processLine(line, stats, moneyRules, trackers) {
 			matchedAny = true
-			notifyMatch(line, trackers)
+			notifyMatch(line, moneyRules, trackers)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -126,13 +127,32 @@ func readNewLines(path string, states map[string]*watchState, stats map[string]*
 }
 
 // notifyMatch wypisuje na konsoli krótkie powiadomienie, gdy linia
-// pasuje do któregoś z trackerów (przydatne w trybie --watch, żeby
-// zobaczyć na żywo np. "🎉 Nagroda dzienna: odebrana").
-func notifyMatch(line string, trackers []compiledTracker) {
+// pasuje do któregoś z trackerów lub reguł pieniężnych (przydatne w trybie
+// --watch, żeby zobaczyć na żywo np. "💰 Sprzedaż towaru (6748.80$)" albo
+// "🎉 Nagroda dzienna").
+func notifyMatch(line string, moneyRules []compiledMoneyRule, trackers []compiledTracker) {
 	rest := line
 	if m := dateRe.FindStringSubmatch(line); m != nil {
 		rest = m[2]
 	}
+
+	for _, r := range moneyRules {
+		rm := r.Re.FindStringSubmatch(rest)
+		if rm == nil {
+			continue
+		}
+		icon := "💰"
+		if r.Kind == "expense" {
+			icon = "💸"
+		}
+		detail := ""
+		if amtStr, ok := namedGroup(r.Re, rm, "amount"); ok {
+			detail = fmt.Sprintf(" (%.2f$)", parseMoneyAmount(amtStr))
+		}
+		fmt.Printf("  %s %s%s\n", icon, r.Name, detail)
+		break // ta sama zasada co w processLine: pierwsze dopasowanie wygrywa
+	}
+
 	for _, t := range trackers {
 		if t.Re.MatchString(rest) {
 			fmt.Printf("  🎉 Wykryto: %s\n", t.Name)
