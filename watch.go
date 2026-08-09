@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"time"
 )
@@ -104,12 +106,23 @@ func readNewLines(path string, states map[string]*watchState, stats map[string]*
 		return false, err
 	}
 
+	// Czytamy cały nowy fragment naraz i dekodujemy jego kodowanie
+	// (patrz encoding.go) — Windows-1250 jest kodowaniem jednobajtowym,
+	// więc dekodowanie fragmentu pliku (bez kontekstu całości) jest
+	// bezpieczne i nie wymaga znajomości reszty pliku.
+	raw, err := io.ReadAll(file)
+	if err != nil {
+		return false, err
+	}
+	data := decodeFileBytes(raw)
+
 	matchedAny := false
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
 	for scanner.Scan() {
-		line := scanner.Text()
-		if processLine(line, stats, moneyRules, trackers) {
+		line := decodeLine(scanner.Bytes())
+		_, ruleOK := processLine(line, stats, moneyRules, trackers)
+		if ruleOK {
 			matchedAny = true
 			notifyMatch(line, moneyRules, trackers)
 		}
@@ -118,11 +131,7 @@ func readNewLines(path string, states map[string]*watchState, stats map[string]*
 		return matchedAny, err
 	}
 
-	newOffset, err := file.Seek(0, 1) // aktualna pozycja po odczycie
-	if err != nil {
-		return matchedAny, err
-	}
-	st.offset = newOffset
+	st.offset += int64(len(raw))
 	return matchedAny, nil
 }
 

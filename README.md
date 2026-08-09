@@ -6,6 +6,34 @@ Program czyta logi klienta MTA:SA (`console*.log`), sumuje dzienne zarobki
 i XP oraz wykrywa wybrane akcje wykonywane raz dziennie (np. odebranie
 nagrody za codzienne logowanie). Wynik zapisywany jest do `raport.txt`.
 
+## Kodowanie plików logów
+
+Program automatycznie wykrywa i konwertuje kodowanie plików `console*.log`:
+UTF-8 (z lub bez BOM), UTF-16 (LE/BE) oraz Windows-1250 ("ANSI" na polskiej
+Windows). Nie trzeba nic konfigurować — jeśli plik nie jest poprawnym UTF-8,
+program automatycznie zakłada Windows-1250 (najczęstsza przyczyna
+"krzaczków" zamiast polskich znaków w logach z Windows) i konwertuje go
+przed analizą.
+
+## Diagnostyka
+
+Po każdym uruchomieniu program wypisuje krótkie podsumowanie parsowania,
+np.:
+```
+Przetworzono 1523 linii logów (rozpoznany znacznik czasu: 1518, dopasowane zdarzenia: 812)
+```
+Jeśli coś wygląda podejrzanie (np. zero rozpoznanych znaczników czasu —
+zwykle inny format logów niż oczekiwany, mimo automatycznej konwersji
+kodowania), program od razu podpowiada możliwą przyczynę i pokazuje
+przykładową linię z pliku do porównania. Przydatne przy zgłoszeniach typu
+"program mi nic nie pokazuje".
+
+## Podsumowanie
+
+Zarówno `raport.txt`, jak i `raport.csv` kończą się sekcją podsumowującą
+z łącznym przychodem, wydatkami, saldem netto, XP oraz liczbą dni, w których
+każdy skonfigurowany tracker wystąpił (np. `Nagroda dzienna: 12/15 dni`).
+
 ## Uruchamianie
 
 Program można uruchomić na dwa sposoby:

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"regexp"
@@ -113,20 +114,25 @@ func newDayStats() *dayStats {
 }
 
 // processLine parsuje pojedynczą linię loga i aktualizuje stats.
-// Zwraca true, jeśli cokolwiek zostało dopasowane (przydatne dla trybu --watch).
+//
+// Zwraca dwie informacje diagnostyczne:
+//   - dateMatched: czy linia w ogóle miała rozpoznawalny znacznik czasu
+//     "[RRRR-MM-DD GG:MM:SS]". Jeśli to zawsze false dla całego pliku,
+//     to najczęściej oznacza złe kodowanie pliku albo inny format logów.
+//   - ruleMatched: czy linia dopasowała się do jakiejkolwiek reguły
+//     pieniężnej lub trackera (przydatne też dla trybu --watch).
 //
 // Uwaga: dla reguł pieniężnych stosujemy zasadę "pierwsze dopasowanie
 // wygrywa" (przerywamy po pierwszej pasującej regule) — dzięki temu jedna
 // linia loga nigdy nie zostanie policzona podwójnie, nawet gdyby dwie
 // reguły przypadkiem się pokrywały.
-func processLine(line string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) bool {
+func processLine(line string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (dateMatched bool, ruleMatched bool) {
 	m := dateRe.FindStringSubmatch(line)
 	if m == nil {
-		return false
+		return false, false
 	}
 	date := m[1]
 	rest := m[2]
-	matched := false
 
 	for _, r := range moneyRules {
 		rm := r.Re.FindStringSubmatch(rest)
@@ -147,7 +153,7 @@ func processLine(line string, stats map[string]*dayStats, moneyRules []compiledM
 			xp, _ := strconv.Atoi(xpStr)
 			d.xp += xp
 		}
-		matched = true
+		ruleMatched = true
 		break
 	}
 
@@ -166,10 +172,10 @@ func processLine(line string, stats map[string]*dayStats, moneyRules []compiledM
 		if len(tm) > 1 && tm[1] != "" {
 			hit.Detail = tm[1]
 		}
-		matched = true
+		ruleMatched = true
 	}
 
-	return matched
+	return true, ruleMatched
 }
 
 func dayEntry(stats map[string]*dayStats, date string) *dayStats {
@@ -181,18 +187,84 @@ func dayEntry(stats map[string]*dayStats, date string) *dayStats {
 	return d
 }
 
-// parseFile czyta cały plik od początku i przepuszcza każdą linię przez processLine.
-func parseFile(path string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
+// parseSummary to statystyki diagnostyczne z parsowania jednego lub
+// wielu plików — pomaga wykryć np. zły format kodowania pliku bez
+// potrzeby ręcznego debugowania.
+type parseSummary struct {
+	lines       int
+	dateMatched int
+	ruleMatched int
+	// sampleLine to pierwsza niepusta linia w ogóle (przydatna, gdy nie
+	// złapano żadnej daty — pokazuje "z czym program w ogóle miał do
+	// czynienia").
+	sampleLine string
+	// sampleMatchedDateLine to pierwsza linia z poprawnie rozpoznaną datą,
+	// która NIE dopasowała żadnej reguły/trackera — pokazywana tylko jako
+	// ostateczny fallback, gdy nie znaleziono nic lepszego (patrz niżej).
+	sampleMatchedDateLine string
+	// sampleNearMissLine to pierwsza niedopasowana linia z datą, która mimo
+	// to "wygląda" jak zdarzenie finansowe (zawiera "$", "XP" itp.) — dużo
+	// bardziej użyteczna do diagnozy niż zupełnie przypadkowa pierwsza
+	// niedopasowana linia (która często jest np. komunikatem połączenia).
+	sampleNearMissLine string
+}
 
-	scanner := bufio.NewScanner(file)
+func (s *parseSummary) add(other parseSummary) {
+	s.lines += other.lines
+	s.dateMatched += other.dateMatched
+	s.ruleMatched += other.ruleMatched
+	if s.sampleLine == "" {
+		s.sampleLine = other.sampleLine
+	}
+	if s.sampleMatchedDateLine == "" {
+		s.sampleMatchedDateLine = other.sampleMatchedDateLine
+	}
+	if s.sampleNearMissLine == "" {
+		s.sampleNearMissLine = other.sampleNearMissLine
+	}
+}
+
+// looksLikeMoneyEvent to prosty heurystyczny test "czy ta linia mogła być
+// próbą zarobku/wydatku" — używany wyłącznie do diagnostyki (żeby nie
+// pokazywać użytkownikowi losowej, nieistotnej linii jako przykładu).
+func looksLikeMoneyEvent(line string) bool {
+	return strings.Contains(line, "$") || strings.Contains(line, "XP")
+}
+
+// parseFile czyta cały plik, wykrywa i konwertuje jego kodowanie do UTF-8
+// (patrz encoding.go), po czym przepuszcza każdą linię przez processLine.
+func parseFile(path string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (parseSummary, error) {
+	var summary parseSummary
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return summary, err
+	}
+	data := decodeFileBytes(raw)
+
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
 	for scanner.Scan() {
-		processLine(scanner.Text(), stats, moneyRules, trackers)
+		line := decodeLine(scanner.Bytes())
+		summary.lines++
+		if summary.sampleLine == "" && strings.TrimSpace(line) != "" {
+			summary.sampleLine = line
+		}
+		dateOK, ruleOK := processLine(line, stats, moneyRules, trackers)
+		if dateOK {
+			summary.dateMatched++
+			if !ruleOK {
+				if summary.sampleMatchedDateLine == "" {
+					summary.sampleMatchedDateLine = line
+				}
+				if summary.sampleNearMissLine == "" && looksLikeMoneyEvent(line) {
+					summary.sampleNearMissLine = line
+				}
+			}
+		}
+		if ruleOK {
+			summary.ruleMatched++
+		}
 	}
-	return scanner.Err()
+	return summary, scanner.Err()
 }

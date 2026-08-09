@@ -12,8 +12,18 @@ import (
 	"strings"
 )
 
-// getLogFiles zwraca posortowane alfabetycznie pliki console*.log
-// z podanego katalogu logów MTA.
+// getLogFiles zwraca pliki logów z podanego katalogu MTA: bieżący
+// console.log oraz jego zrotowane wersje console.log.1, console.log.2 itd.
+// (MTA rotuje logi numerowanym sufiksem, bez końcówki ".log" na
+// zrotowanych plikach — dlatego dopasowujemy po PREFIKSIE "console.log",
+// a nie po sufiksie ".log", żeby nie pomijać starszych, zrotowanych logów).
+//
+// Posortowane naturalnie (numerycznie) rosnąco wg numeru rotacji, żeby
+// console.log.2 nie trafiał przed console.log.10 tak jak przy zwykłym
+// sortowaniu alfabetycznym stringów — w praktyce kolejność przetwarzania
+// plików nie wpływa na wynik (dane ze wszystkich plików i tak są
+// sumowane do wspólnej mapy po dacie), ale czytelna kolejność ułatwia
+// debugowanie i komunikaty w konsoli.
 func getLogFiles(dir string) ([]string, error) {
 	var files []string
 	entries, err := os.ReadDir(dir)
@@ -25,11 +35,13 @@ func getLogFiles(dir string) ([]string, error) {
 			continue
 		}
 		name := e.Name()
-		if strings.HasPrefix(name, "console") && strings.HasSuffix(name, ".log") {
+		if strings.HasPrefix(name, "console.log") {
 			files = append(files, filepath.Join(dir, name))
 		}
 	}
-	sort.Strings(files)
+	sort.Slice(files, func(i, j int) bool {
+		return logFileSortKey(files[i]) < logFileSortKey(files[j])
+	})
 	return files, nil
 }
 
@@ -62,6 +74,26 @@ func trackerStatus(d *dayStats, name string) string {
 // trackerNames to lista WSZYSTKICH skonfigurowanych trackerów — dzięki temu
 // dzień, w którym np. nagroda dzienna NIE została odebrana, też to jawnie
 // pokazuje, zamiast po prostu pomijać tracker w tym dniu.
+// logFileSortKey zwraca klucz sortowania dla nazwy pliku loga: 0 dla
+// bieżącego "console.log", a numer rotacji dla "console.log.N" — dzięki
+// temu sortowanie jest numeryczne, a nie alfabetyczne (co błędnie
+// umieściłoby "console.log.10" przed "console.log.2").
+func logFileSortKey(path string) int {
+	name := filepath.Base(path)
+	suffix := strings.TrimPrefix(name, "console.log")
+	suffix = strings.TrimPrefix(suffix, ".")
+	if suffix == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(suffix)
+	if err != nil {
+		// Nietypowa nazwa (np. "console.log.bak") — na koniec listy,
+		// żeby nie zaburzać kolejności normalnych rotacji.
+		return 1 << 30
+	}
+	return n
+}
+
 func writeReport(path string, stats map[string]*dayStats, trackerNames []string) error {
 	var dates []string
 	for d := range stats {
@@ -79,6 +111,11 @@ func writeReport(path string, stats map[string]*dayStats, trackerNames []string)
 	defer w.Flush()
 
 	fmt.Fprintln(w, "=== RAPORT DZIENNY ===")
+
+	var totalIncome, totalExpense float64
+	totalXP := 0
+	trackerHits := make(map[string]int, len(trackerNames))
+
 	for _, date := range dates {
 		d := stats[date]
 		net := d.income - d.expense
@@ -86,10 +123,31 @@ func writeReport(path string, stats map[string]*dayStats, trackerNames []string)
 			date, net, d.income, d.expense, d.xp)
 
 		for _, name := range trackerNames {
-			fmt.Fprintf(w, " | %s: %s", name, trackerStatus(d, name))
+			status := trackerStatus(d, name)
+			fmt.Fprintf(w, " | %s: %s", name, status)
+			if hit, ok := d.trackers[name]; ok && hit.Detected {
+				trackerHits[name]++
+			}
 		}
 		fmt.Fprintln(w)
+
+		totalIncome += d.income
+		totalExpense += d.expense
+		totalXP += d.xp
 	}
+
+	days := len(dates)
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "=== PODSUMOWANIE ===")
+	fmt.Fprintf(w, "Liczba dni w raporcie: %d\n", days)
+	fmt.Fprintf(w, "Łączny przychód: %.2f$\n", totalIncome)
+	fmt.Fprintf(w, "Łączne wydatki: %.2f$\n", totalExpense)
+	fmt.Fprintf(w, "Saldo netto: %.2f$\n", totalIncome-totalExpense)
+	fmt.Fprintf(w, "Łączne XP: %d\n", totalXP)
+	for _, name := range trackerNames {
+		fmt.Fprintf(w, "%s: %d/%d dni\n", name, trackerHits[name], days)
+	}
+
 	return nil
 }
 
@@ -129,6 +187,10 @@ func writeCSVReport(path string, stats map[string]*dayStats, trackerNames []stri
 		return err
 	}
 
+	var totalIncome, totalExpense float64
+	totalXP := 0
+	trackerHits := make(map[string]int, len(trackerNames))
+
 	for _, date := range dates {
 		d := stats[date]
 		row := []string{
@@ -140,11 +202,36 @@ func writeCSVReport(path string, stats map[string]*dayStats, trackerNames []stri
 		}
 		for _, name := range trackerNames {
 			row = append(row, trackerStatus(d, name))
+			if hit, ok := d.trackers[name]; ok && hit.Detected {
+				trackerHits[name]++
+			}
 		}
 		if err := w.Write(row); err != nil {
 			return err
 		}
+
+		totalIncome += d.income
+		totalExpense += d.expense
+		totalXP += d.xp
 	}
+
+	// Wiersz podsumowujący na końcu — łączny przychód/wydatki/netto/XP,
+	// a dla trackerów liczba dni "X/Y", w których dana akcja wystąpiła.
+	days := len(dates)
+	summaryRow := []string{
+		"SUMA",
+		formatCSVNumber(totalIncome),
+		formatCSVNumber(totalExpense),
+		formatCSVNumber(totalIncome - totalExpense),
+		strconv.Itoa(totalXP),
+	}
+	for _, name := range trackerNames {
+		summaryRow = append(summaryRow, fmt.Sprintf("%d/%d dni", trackerHits[name], days))
+	}
+	if err := w.Write(summaryRow); err != nil {
+		return err
+	}
+
 	return w.Error()
 }
 
@@ -212,7 +299,77 @@ func runInteractiveMenu(reader *bufio.Reader, stats map[string]*dayStats, moneyR
 	}
 }
 
+// printParseDiagnostics wypisuje krótkie podsumowanie parsowania logów oraz,
+// jeśli coś wygląda podejrzanie (zero rozpoznanych linii, zero dopasowanych
+// reguł mimo poprawnych znaczników czasu), praktyczne wskazówki — żeby przy
+// zgłoszeniu "program nic nie pokazuje" dało się to zdiagnozować z samego
+// komunikatu, bez proszenia użytkownika o pliki.
+// printActiveRules wypisuje, ile reguł/trackerów faktycznie się skompilowało
+// z config.json. Jeśli ta liczba jest niższa niż oczekujesz (albo zerowa),
+// to znaczy że któreś wpisy zostały po cichu odrzucone wcześniej (patrz
+// ostrzeżenia "Uwaga: pomijam..." wypisywane przez compileMoneyRules/
+// compileTrackers) — zamiast dopiero zgadywać przy pustym raporcie.
+func printActiveRules(moneyRules []compiledMoneyRule, trackers []compiledTracker) {
+	names := make([]string, 0, len(moneyRules))
+	for _, r := range moneyRules {
+		names = append(names, r.Name)
+	}
+	trackerNames := make([]string, 0, len(trackers))
+	for _, t := range trackers {
+		trackerNames = append(trackerNames, t.Name)
+	}
+	fmt.Printf("Aktywne reguły przychodów/wydatków (%d): %s\n", len(names), strings.Join(names, ", "))
+	fmt.Printf("Aktywne trackery (%d): %s\n\n", len(trackerNames), strings.Join(trackerNames, ", "))
+}
+
+func printParseDiagnostics(s parseSummary) {
+	fmt.Printf("Przetworzono %d linii logów (rozpoznany znacznik czasu: %d, dopasowane zdarzenia: %d)\n",
+		s.lines, s.dateMatched, s.ruleMatched)
+
+	if s.lines == 0 {
+		fmt.Println("⚠ Pliki logów są puste — nie ma czego analizować.")
+		return
+	}
+
+	if s.dateMatched == 0 {
+		fmt.Println("⚠ Żadna linia nie pasuje do oczekiwanego formatu znacznika czasu \"[RRRR-MM-DD GG:MM:SS]\".")
+		fmt.Println("  Możliwe przyczyny: nietypowe kodowanie pliku (program próbuje wykryć")
+		fmt.Println("  UTF-8/Windows-1250/UTF-16 automatycznie) albo inny format logów w Twojej wersji MTA.")
+		if s.sampleLine != "" {
+			fmt.Println("  Przykładowa linia z pliku (dla porównania z oczekiwanym formatem):")
+			fmt.Println("   ", s.sampleLine)
+		}
+		return
+	}
+
+	if s.ruleMatched == 0 {
+		fmt.Println("⚠ Znaczniki czasu są rozpoznawane, ale żadna linia nie pasuje do skonfigurowanych")
+		fmt.Println("  reguł przychodów/wydatków ani trackerów.")
+		switch {
+		case s.sampleNearMissLine != "":
+			fmt.Println("  Ta linia wygląda jak zdarzenie finansowe, ale nie pasuje do żadnej reguły")
+			fmt.Println("  w config.json — porównaj jej format z wzorcami w sekcji \"money_rules\"/\"trackers\":")
+			fmt.Println("   ", s.sampleNearMissLine)
+		case s.sampleMatchedDateLine != "":
+			fmt.Println("  Nie znalazłem w tych logach żadnej linii zawierającej \"$\" ani \"XP\" —")
+			fmt.Println("  wygląda na to, że w tej sesji faktycznie nie doszło do żadnego zarejestrowanego")
+			fmt.Println("  zarobku/wydatku/nagrody (a nie że reguły są zepsute). Przykładowa linia z logów:")
+			fmt.Println("   ", s.sampleMatchedDateLine)
+		}
+	}
+}
+
+// appVersion identyfikuje wersję kodu — wypisywana na starcie programu,
+// żeby przy problemach dało się jednoznacznie stwierdzić, czy uruchomiony
+// .exe faktycznie odpowiada najnowszym plikom źródłowym, bez zgadywania
+// (np. czy build w GoLandzie/CI nie użył starego cache).
+// Podbijaj tę wartość przy każdej istotnej zmianie.
+const appVersion = "1.2.0-dev (kodowanie CP1250 + diagnostyka + podsumowanie)"
+
 func main() {
+	fmt.Println("ProjectRPG Earnings Scanner —", appVersion)
+	fmt.Println()
+
 	setPath := flag.Bool("set-path", false, "wymuś ponowne ustawienie ścieżki do katalogu logów MTA")
 	watch := flag.Bool("watch", false, "uruchom w trybie ciągłej obserwacji logów na żywo (pomija menu)")
 	reportFlag := flag.String("out", "raport.txt", "ścieżka pliku wynikowego raportu")
@@ -245,6 +402,7 @@ func main() {
 
 	trackers := compileTrackers(cfg.Trackers)
 	moneyRules := compileMoneyRules(cfg.MoneyRules)
+	printActiveRules(moneyRules, trackers)
 
 	files, err := getLogFiles(cfg.MTAPath)
 	if err != nil {
@@ -259,13 +417,17 @@ func main() {
 	}
 
 	stats := make(map[string]*dayStats)
+	var totalSummary parseSummary
 	for _, f := range files {
-		if err := parseFile(f, stats, moneyRules, trackers); err != nil {
+		summary, err := parseFile(f, stats, moneyRules, trackers)
+		totalSummary.add(summary)
+		if err != nil {
 			// Jeden uszkodzony/zablokowany plik nie powinien wywalać
 			// całego raportu — informujemy i kontynuujemy z resztą.
 			fmt.Printf("Uwaga: nie udało się przetworzyć %s: %v\n", f, err)
 		}
 	}
+	printParseDiagnostics(totalSummary)
 
 	if nonInteractive {
 		names := trackerNamesFrom(trackers)
