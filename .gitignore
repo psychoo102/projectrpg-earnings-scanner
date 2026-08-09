@@ -25,4 +25,8 @@ go.work.sum
 .env
 
 # Application generated raport file
-raport.exe
+raport.txt
+
+# Lokalny config wygenerowany podczas developmentu/testów
+# (produkcyjnie config.json trzyma się w %APPDATA%, nie w repo)
+config.json

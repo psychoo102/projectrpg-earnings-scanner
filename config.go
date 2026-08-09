@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,10 +24,30 @@ type Tracker struct {
 	Pattern string `json:"pattern"`
 }
 
+// MoneyRule to reguła rozpoznająca w logu jeden konkretny rodzaj wpływu
+// (income) lub wydatku (expense) — np. sprzedaż towaru, tankowanie paliwa.
+//
+// Pattern to wyrażenie regularne dopasowywane do treści linii loga
+// (bez fragmentu z datą/godziną). Musi zawierać nazwaną grupę
+// "(?P<amount>...)" z kwotą (może zawierać przecinek jako separator
+// tysięcy, np. "6,748.80" — zostanie poprawnie zinterpretowany).
+// Opcjonalnie może też zawierać nazwaną grupę "(?P<xp>...)", jeśli ta sama
+// linia niesie też informację o zdobytym XP.
+//
+// Dzięki nazwanym grupom dodanie nowego rodzaju przychodu/kosztu
+// (np. kolejnej stawki, nowego paliwa, innej pracy) wymaga tylko dopisania
+// wpisu w config.json — bez zmian w kodzie.
+type MoneyRule struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind"` // "income" albo "expense"
+	Pattern string `json:"pattern"`
+}
+
 // Config przechowuje wszystkie ustawienia użytkownika zapisywane na dysku.
 type Config struct {
-	MTAPath  string    `json:"mta_path"`
-	Trackers []Tracker `json:"trackers"`
+	MTAPath    string      `json:"mta_path"`
+	Trackers   []Tracker   `json:"trackers"`
+	MoneyRules []MoneyRule `json:"money_rules"`
 }
 
 // defaultTrackers to zestaw wykrywaczy dodawany automatycznie przy
@@ -37,6 +58,42 @@ func defaultTrackers() []Tracker {
 		{
 			Name:    "Nagroda dzienna",
 			Pattern: `Otrzymałeś \d+(?:\.\d+)? \$ za codzienne logowanie(?:.*\(Dzień (\d+)\))?`,
+		},
+	}
+}
+
+// amountPattern to współdzielony fragment regexu dopasowujący kwotę
+// pieniężną, opcjonalnie z przecinkiem jako separatorem tysięcy,
+// np. "150.50" albo "6,748.80".
+const amountPattern = `[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?`
+
+// defaultMoneyRules to zestaw reguł przychodów/wydatków dodawany
+// automatycznie przy pierwszym uruchomieniu. Użytkownik może dopisywać
+// kolejne (np. nowe paliwa, nowe prace) bezpośrednio w config.json.
+func defaultMoneyRules() []MoneyRule {
+	return []MoneyRule{
+		{
+			Name:    "Zarobek (standardowy)",
+			Kind:    "income",
+			Pattern: `Otrzymałeś (?P<amount>` + amountPattern + `)\$.*\+(?P<xp>[0-9]+) XP`,
+		},
+		{
+			Name:    "Zrzucenie towaru",
+			Kind:    "income",
+			Pattern: `Zrzucono [0-9.,]+ kg .*? na stos \(\+(?P<xp>[0-9]+) XP\)`,
+		},
+		{
+			Name:    "Sprzedaż towaru",
+			Kind:    "income",
+			Pattern: `Sprzedano [0-9.,]+ kg .*? za (?P<amount>` + amountPattern + `)\$`,
+		},
+		{
+			Name:    "Tankowanie paliwa",
+			Kind:    "expense",
+			// Nazwa paliwa (LPG, Pb 95, Pb 98, On, ...) celowo nie jest
+			// wymieniona wprost — ".+?" złapie dowolną nazwę, więc nowe
+			// rodzaje paliwa nie wymagają zmiany wzorca.
+			Pattern: `Pomyślnie zatankowano [0-9.,]+l .+? za kwotę (?P<amount>` + amountPattern + `)\$`,
 		},
 	}
 }
@@ -100,11 +157,18 @@ func (c *Config) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("nie można utworzyć katalogu konfiguracji: %w", err)
 	}
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+	// Wyłączamy domyślne escapowanie HTML (<, >, &), bo inaczej wzorce
+	// regex z nazwanymi grupami "(?P<amount>...)" byłyby zapisane jako
+	// nieczytelne "(?P\u003camount\u003e...)" — a ten plik ma być
+	// wygodny do ręcznej edycji.
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(c); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		return fmt.Errorf("nie można zapisać %s: %w", path, err)
 	}
 	return nil
@@ -166,7 +230,7 @@ func LoadOrCreateConfig(reader *bufio.Reader) (*Config, error) {
 			// Dogrywamy ewentualne nowe domyślne trackery dodane w nowszej
 			// wersji programu, żeby użytkownicy aktualizujący aplikację
 			// automatycznie dostawali nowe wykrywacze.
-			if mergeMissingTrackers(cfg) {
+			if mergeMissingDefaults(cfg) {
 				_ = cfg.Save(path)
 			}
 			return cfg, nil
@@ -188,6 +252,9 @@ func LoadOrCreateConfig(reader *bufio.Reader) (*Config, error) {
 	if len(cfg.Trackers) == 0 {
 		cfg.Trackers = defaultTrackers()
 	}
+	if len(cfg.MoneyRules) == 0 {
+		cfg.MoneyRules = defaultMoneyRules()
+	}
 
 	if err := cfg.Save(path); err != nil {
 		return nil, err
@@ -196,19 +263,34 @@ func LoadOrCreateConfig(reader *bufio.Reader) (*Config, error) {
 	return cfg, nil
 }
 
-// mergeMissingTrackers dopisuje domyślne trackery, których użytkownik
-// jeszcze nie ma w swoim configu (po nazwie). Zwraca true, jeśli coś dodano.
-func mergeMissingTrackers(cfg *Config) bool {
-	existing := make(map[string]bool, len(cfg.Trackers))
+// mergeMissingDefaults dopisuje domyślne trackery i reguły
+// przychodów/wydatków, których użytkownik jeszcze nie ma w swoim configu
+// (po nazwie) — dotyczy głównie osób aktualizujących program ze starszej
+// wersji, żeby automatycznie dostały nowe wykrywacze. Zwraca true, jeśli
+// cokolwiek dodano.
+func mergeMissingDefaults(cfg *Config) bool {
+	existingTrackers := make(map[string]bool, len(cfg.Trackers))
 	for _, t := range cfg.Trackers {
-		existing[t.Name] = true
+		existingTrackers[t.Name] = true
 	}
 	added := false
 	for _, t := range defaultTrackers() {
-		if !existing[t.Name] {
+		if !existingTrackers[t.Name] {
 			cfg.Trackers = append(cfg.Trackers, t)
 			added = true
 		}
 	}
+
+	existingRules := make(map[string]bool, len(cfg.MoneyRules))
+	for _, r := range cfg.MoneyRules {
+		existingRules[r.Name] = true
+	}
+	for _, r := range defaultMoneyRules() {
+		if !existingRules[r.Name] {
+			cfg.MoneyRules = append(cfg.MoneyRules, r)
+			added = true
+		}
+	}
+
 	return added
 }
