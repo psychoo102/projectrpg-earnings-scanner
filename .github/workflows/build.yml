@@ -24,7 +24,7 @@ jobs:
         cache: true
 
     - name: Download dependencies
-      run: go mod download
+      run: go mod download all
 
     - name: Build for Windows
       run: |
