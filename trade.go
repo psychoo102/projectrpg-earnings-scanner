@@ -48,6 +48,10 @@ const (
 // ("dopasowane zdarzenia"), żeby te linie nie raportowały się jako
 // niedopasowane.
 func (ts *tradeState) processLine(date, rest string, stats map[string]*dayStats) bool {
+	if isChatLine(rest) {
+		return false
+	}
+
 	if strings.Contains(rest, tradeReceivingHint) {
 		ts.active = true
 		ts.date = date

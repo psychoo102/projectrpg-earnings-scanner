@@ -364,7 +364,7 @@ func printParseDiagnostics(s parseSummary) {
 // .exe faktycznie odpowiada najnowszym plikom źródłowym, bez zgadywania
 // (np. czy build w GoLandzie/CI nie użył starego cache).
 // Podbijaj tę wartość przy każdej istotnej zmianie.
-const appVersion = "1.2.2-dev (obsługa XP/EXP + nagroda dzienna w dowolnej walucie + wymiana P2P + rotacja logów)"
+const appVersion = "1.2.3-dev (filtr wiadomości czatu + obsługa XP/EXP + nagroda dzienna w dowolnej walucie)"
 
 func main() {
 	fmt.Println("ProjectRPG Earnings Scanner —", appVersion)

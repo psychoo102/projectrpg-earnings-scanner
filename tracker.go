@@ -13,6 +13,27 @@ import (
 // dateRe wyłuskuje datę z początku linii loga, np. "[2026-08-08 04:18:11]".
 var dateRe = regexp.MustCompile(`^\[(\d{4}-\d{2}-\d{2}) [^\]]+\]\s*(.*)$`)
 
+// outputPrefixRe usuwa standardowy prefiks "[Output] : " z reszty linii,
+// żeby sprawdzić, co faktycznie następuje po nim (patrz isChatLine).
+var outputPrefixRe = regexp.MustCompile(`^\[Output\]\s*:\s*`)
+
+// chatLinePrefixRe rozpoznaje typowe prefiksy wiadomości na czacie w MTA,
+// np. "OG > (24) CzajKA:", "G> Gracz123:", "<< [124] kxaf:" — czyli
+// "kanał + opcjonalny numer + nazwa gracza + dwukropek" na samym początku
+// treści.
+var chatLinePrefixRe = regexp.MustCompile(`^(?:[A-Za-zżźćńółęąśŻŹĆŃÓŁĘĄŚ]{1,10}\s*>|<<|>>)\s*(?:[\(\[]\d+[\)\]]\s*)?[^\s:]+\s*:`)
+
+// isChatLine sprawdza, czy linia (fragment po znaczniku czasu) wygląda na
+// wiadomość na czacie, a nie prawdziwy komunikat systemowy gry. Potrzebne,
+// bo gracze potrafią zacytować/wkleić na czacie tekst identyczny z
+// prawdziwym komunikatem systemowym (np. serwer publicznie ogłasza czyjś
+// kamień milowy streaka logowań) — bez tego sprawdzenia taka linia
+// zostałaby błędnie policzona jako prawdziwe zdarzenie.
+func isChatLine(rest string) bool {
+	content := outputPrefixRe.ReplaceAllString(rest, "")
+	return chatLinePrefixRe.MatchString(content)
+}
+
 // compiledTracker to Tracker po skompilowaniu wzorca do regexp.Regexp.
 type compiledTracker struct {
 	Name string
@@ -146,6 +167,10 @@ func matchDate(line string) (date string, rest string, ok bool) {
 // linia loga nigdy nie zostanie policzona podwójnie, nawet gdyby dwie
 // reguły przypadkiem się pokrywały.
 func processLine(date, rest string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (ruleMatched bool) {
+	if isChatLine(rest) {
+		return false
+	}
+
 	for _, r := range moneyRules {
 		rm := r.Re.FindStringSubmatch(rest)
 		if rm == nil {
@@ -283,7 +308,7 @@ func parseFile(path string, stats map[string]*dayStats, moneyRules []compiledMon
 		if summary.sampleMatchedDateLine == "" {
 			summary.sampleMatchedDateLine = line
 		}
-		if summary.sampleNearMissLine == "" && looksLikeMoneyEvent(line) {
+		if summary.sampleNearMissLine == "" && looksLikeMoneyEvent(line) && !isChatLine(rest) {
 			summary.sampleNearMissLine = line
 		}
 	}
