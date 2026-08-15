@@ -13,6 +13,27 @@ import (
 // dateRe wyłuskuje datę z początku linii loga, np. "[2026-08-08 04:18:11]".
 var dateRe = regexp.MustCompile(`^\[(\d{4}-\d{2}-\d{2}) [^\]]+\]\s*(.*)$`)
 
+// outputPrefixRe usuwa standardowy prefiks "[Output] : " z reszty linii,
+// żeby sprawdzić, co faktycznie następuje po nim (patrz isChatLine).
+var outputPrefixRe = regexp.MustCompile(`^\[Output\]\s*:\s*`)
+
+// chatLinePrefixRe rozpoznaje typowe prefiksy wiadomości na czacie w MTA,
+// np. "OG > (24) CzajKA:", "G> Gracz123:", "<< [124] kxaf:" — czyli
+// "kanał + opcjonalny numer + nazwa gracza + dwukropek" na samym początku
+// treści.
+var chatLinePrefixRe = regexp.MustCompile(`^(?:[A-Za-zżźćńółęąśŻŹĆŃÓŁĘĄŚ]{1,10}\s*>|<<|>>)\s*(?:[\(\[]\d+[\)\]]\s*)?[^\s:]+\s*:`)
+
+// isChatLine sprawdza, czy linia (fragment po znaczniku czasu) wygląda na
+// wiadomość na czacie, a nie prawdziwy komunikat systemowy gry. Potrzebne,
+// bo gracze potrafią zacytować/wkleić na czacie tekst identyczny z
+// prawdziwym komunikatem systemowym (np. serwer publicznie ogłasza czyjś
+// kamień milowy streaka logowań) — bez tego sprawdzenia taka linia
+// zostałaby błędnie policzona jako prawdziwe zdarzenie.
+func isChatLine(rest string) bool {
+	content := outputPrefixRe.ReplaceAllString(rest, "")
+	return chatLinePrefixRe.MatchString(content)
+}
+
 // compiledTracker to Tracker po skompilowaniu wzorca do regexp.Regexp.
 type compiledTracker struct {
 	Name string
@@ -126,13 +147,29 @@ func newDayStats() *dayStats {
 // wygrywa" (przerywamy po pierwszej pasującej regule) — dzięki temu jedna
 // linia loga nigdy nie zostanie policzona podwójnie, nawet gdyby dwie
 // reguły przypadkiem się pokrywały.
-func processLine(line string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (dateMatched bool, ruleMatched bool) {
+// matchDate sprawdza, czy linia ma rozpoznawalny znacznik czasu
+// "[RRRR-MM-DD GG:MM:SS]" i jeśli tak, zwraca datę oraz resztę linii.
+func matchDate(line string) (date string, rest string, ok bool) {
 	m := dateRe.FindStringSubmatch(line)
 	if m == nil {
-		return false, false
+		return "", "", false
 	}
-	date := m[1]
-	rest := m[2]
+	return m[1], m[2], true
+}
+
+// processLine dopasowuje POJEDYNCZĄ, już wyodrębnioną linię (data + reszta)
+// do reguł pieniężnych i trackerów — to proste, jednoliniowe dopasowania
+// regex. Sekwencje wieloliniowe (np. wymiana P2P) obsługuje osobno
+// tradeState.processLine (patrz trade.go), wywoływany równolegle w parseFile.
+//
+// Uwaga: dla reguł pieniężnych stosujemy zasadę "pierwsze dopasowanie
+// wygrywa" (przerywamy po pierwszej pasującej regule) — dzięki temu jedna
+// linia loga nigdy nie zostanie policzona podwójnie, nawet gdyby dwie
+// reguły przypadkiem się pokrywały.
+func processLine(date, rest string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (ruleMatched bool) {
+	if isChatLine(rest) {
+		return false
+	}
 
 	for _, r := range moneyRules {
 		rm := r.Re.FindStringSubmatch(rest)
@@ -175,7 +212,7 @@ func processLine(line string, stats map[string]*dayStats, moneyRules []compiledM
 		ruleMatched = true
 	}
 
-	return true, ruleMatched
+	return ruleMatched
 }
 
 func dayEntry(stats map[string]*dayStats, date string) *dayStats {
@@ -232,9 +269,12 @@ func looksLikeMoneyEvent(line string) bool {
 }
 
 // parseFile czyta cały plik, wykrywa i konwertuje jego kodowanie do UTF-8
-// (patrz encoding.go), po czym przepuszcza każdą linię przez processLine.
+// (linia po linii — patrz encoding.go), po czym przepuszcza każdą linię
+// przez processLine (proste reguły jednoliniowe) oraz przez tradeState
+// (wieloliniowe sekwencje wymiany P2P — patrz trade.go).
 func parseFile(path string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (parseSummary, error) {
 	var summary parseSummary
+	var trade tradeState
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -250,20 +290,26 @@ func parseFile(path string, stats map[string]*dayStats, moneyRules []compiledMon
 		if summary.sampleLine == "" && strings.TrimSpace(line) != "" {
 			summary.sampleLine = line
 		}
-		dateOK, ruleOK := processLine(line, stats, moneyRules, trackers)
-		if dateOK {
-			summary.dateMatched++
-			if !ruleOK {
-				if summary.sampleMatchedDateLine == "" {
-					summary.sampleMatchedDateLine = line
-				}
-				if summary.sampleNearMissLine == "" && looksLikeMoneyEvent(line) {
-					summary.sampleNearMissLine = line
-				}
-			}
+
+		date, rest, dateOK := matchDate(line)
+		if !dateOK {
+			continue
 		}
-		if ruleOK {
+		summary.dateMatched++
+
+		ruleOK := processLine(date, rest, stats, moneyRules, trackers)
+		tradeOK := trade.processLine(date, rest, stats)
+
+		if ruleOK || tradeOK {
 			summary.ruleMatched++
+			continue
+		}
+
+		if summary.sampleMatchedDateLine == "" {
+			summary.sampleMatchedDateLine = line
+		}
+		if summary.sampleNearMissLine == "" && looksLikeMoneyEvent(line) && !isChatLine(rest) {
+			summary.sampleNearMissLine = line
 		}
 	}
 	return summary, scanner.Err()
