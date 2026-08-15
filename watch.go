@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -16,9 +17,13 @@ import (
 const watchPollInterval = 2 * time.Second
 
 // watchState pamięta, ile bajtów danego pliku już przeczytaliśmy,
-// żeby przy kolejnym sprawdzeniu doczytać tylko nowy fragment ("tail -f").
+// żeby przy kolejnym sprawdzeniu doczytać tylko nowy fragment ("tail -f"),
+// oraz stan sekwencji wymiany P2P (tradeState) — sekwencja ta może zostać
+// dopisana w kilku kolejnych odczytach, więc jej stan musi przetrwać
+// między nimi, osobno dla każdego pliku.
 type watchState struct {
 	offset int64
+	trade  tradeState
 }
 
 // runWatch uruchamia się w pętli: co watchPollInterval sprawdza katalog
@@ -121,10 +126,25 @@ func readNewLines(path string, states map[string]*watchState, stats map[string]*
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
 	for scanner.Scan() {
 		line := decodeLine(scanner.Bytes())
-		_, ruleOK := processLine(line, stats, moneyRules, trackers)
-		if ruleOK {
+		date, rest, dateOK := matchDate(line)
+		if !dateOK {
+			continue
+		}
+		ruleOK := processLine(date, rest, stats, moneyRules, trackers)
+
+		var tradeNotify string
+		if strings.Contains(rest, tradeSuccessHint) && st.trade.active {
+			tradeNotify = fmt.Sprintf("  🤝 Wymiana zakończona (przychód: %.2f$, wydatek: %.2f$)\n", st.trade.income, st.trade.expense)
+		}
+		tradeOK := st.trade.processLine(date, rest, stats)
+
+		if ruleOK || tradeOK {
 			matchedAny = true
-			notifyMatch(line, moneyRules, trackers)
+			if tradeNotify != "" {
+				fmt.Print(tradeNotify)
+			} else {
+				notifyMatch(line, moneyRules, trackers)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

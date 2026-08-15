@@ -126,14 +126,26 @@ func newDayStats() *dayStats {
 // wygrywa" (przerywamy po pierwszej pasującej regule) — dzięki temu jedna
 // linia loga nigdy nie zostanie policzona podwójnie, nawet gdyby dwie
 // reguły przypadkiem się pokrywały.
-func processLine(line string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (dateMatched bool, ruleMatched bool) {
+// matchDate sprawdza, czy linia ma rozpoznawalny znacznik czasu
+// "[RRRR-MM-DD GG:MM:SS]" i jeśli tak, zwraca datę oraz resztę linii.
+func matchDate(line string) (date string, rest string, ok bool) {
 	m := dateRe.FindStringSubmatch(line)
 	if m == nil {
-		return false, false
+		return "", "", false
 	}
-	date := m[1]
-	rest := m[2]
+	return m[1], m[2], true
+}
 
+// processLine dopasowuje POJEDYNCZĄ, już wyodrębnioną linię (data + reszta)
+// do reguł pieniężnych i trackerów — to proste, jednoliniowe dopasowania
+// regex. Sekwencje wieloliniowe (np. wymiana P2P) obsługuje osobno
+// tradeState.processLine (patrz trade.go), wywoływany równolegle w parseFile.
+//
+// Uwaga: dla reguł pieniężnych stosujemy zasadę "pierwsze dopasowanie
+// wygrywa" (przerywamy po pierwszej pasującej regule) — dzięki temu jedna
+// linia loga nigdy nie zostanie policzona podwójnie, nawet gdyby dwie
+// reguły przypadkiem się pokrywały.
+func processLine(date, rest string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (ruleMatched bool) {
 	for _, r := range moneyRules {
 		rm := r.Re.FindStringSubmatch(rest)
 		if rm == nil {
@@ -175,7 +187,7 @@ func processLine(line string, stats map[string]*dayStats, moneyRules []compiledM
 		ruleMatched = true
 	}
 
-	return true, ruleMatched
+	return ruleMatched
 }
 
 func dayEntry(stats map[string]*dayStats, date string) *dayStats {
@@ -232,9 +244,12 @@ func looksLikeMoneyEvent(line string) bool {
 }
 
 // parseFile czyta cały plik, wykrywa i konwertuje jego kodowanie do UTF-8
-// (patrz encoding.go), po czym przepuszcza każdą linię przez processLine.
+// (linia po linii — patrz encoding.go), po czym przepuszcza każdą linię
+// przez processLine (proste reguły jednoliniowe) oraz przez tradeState
+// (wieloliniowe sekwencje wymiany P2P — patrz trade.go).
 func parseFile(path string, stats map[string]*dayStats, moneyRules []compiledMoneyRule, trackers []compiledTracker) (parseSummary, error) {
 	var summary parseSummary
+	var trade tradeState
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -250,20 +265,26 @@ func parseFile(path string, stats map[string]*dayStats, moneyRules []compiledMon
 		if summary.sampleLine == "" && strings.TrimSpace(line) != "" {
 			summary.sampleLine = line
 		}
-		dateOK, ruleOK := processLine(line, stats, moneyRules, trackers)
-		if dateOK {
-			summary.dateMatched++
-			if !ruleOK {
-				if summary.sampleMatchedDateLine == "" {
-					summary.sampleMatchedDateLine = line
-				}
-				if summary.sampleNearMissLine == "" && looksLikeMoneyEvent(line) {
-					summary.sampleNearMissLine = line
-				}
-			}
+
+		date, rest, dateOK := matchDate(line)
+		if !dateOK {
+			continue
 		}
-		if ruleOK {
+		summary.dateMatched++
+
+		ruleOK := processLine(date, rest, stats, moneyRules, trackers)
+		tradeOK := trade.processLine(date, rest, stats)
+
+		if ruleOK || tradeOK {
 			summary.ruleMatched++
+			continue
+		}
+
+		if summary.sampleMatchedDateLine == "" {
+			summary.sampleMatchedDateLine = line
+		}
+		if summary.sampleNearMissLine == "" && looksLikeMoneyEvent(line) {
+			summary.sampleNearMissLine = line
 		}
 	}
 	return summary, scanner.Err()

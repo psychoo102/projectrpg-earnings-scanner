@@ -56,8 +56,16 @@ type Config struct {
 func defaultTrackers() []Tracker {
 	return []Tracker{
 		{
-			Name:    "Nagroda dzienna",
-			Pattern: `Otrzymałeś \d+(?:\.\d+)? \$ za codzienne logowanie(?:.*\(Dzień (\d+)\))?`,
+			Name: "Nagroda dzienna",
+			// Kotwiczymy na stałym fragmencie tekstu ("za codzienne
+			// logowanie, oby tak dalej!"), a NIE na konkretnej walucie
+			// nagrody — bo nagroda bywa wypłacana w różnej postaci ($,
+			// punkty reputacji, "Niespodzianka" itd.), zależnie od dnia
+			// serii logowań. Wcześniejsza wersja wymagała dosłownie "$",
+			// przez co nagrody w innej walucie (np. "Otrzymałeś 100
+			// reputacji za codzienne logowanie...") w ogóle nie były
+			// wykrywane.
+			Pattern: `za codzienne logowanie, oby tak dalej!(?:.*\(Dzień (\d+)\))?`,
 		},
 	}
 }
@@ -73,9 +81,16 @@ const amountPattern = `[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?`
 func defaultMoneyRules() []MoneyRule {
 	return []MoneyRule{
 		{
-			Name:    "Zarobek (standardowy)",
-			Kind:    "income",
-			Pattern: `Otrzymałeś (?P<amount>` + amountPattern + `)\$.*\+(?P<xp>[0-9]+) XP`,
+			Name: "Zarobek (standardowy)",
+			Kind: "income",
+			// "(?i:e?xp)" obsługuje zarówno "XP" jak i "EXP" (różne prace na
+			// serwerze różnie skracają "punkty doświadczenia" — dodatkowo
+			// bez rozróżniania wielkości liter, na wypadek kolejnych
+			// wariantów), a ".*" pomiędzy kwotą a "+N XP/EXP" pozwala na
+			// dowolny tekst pomiędzy nimi (np. nawiasy, "[+46%]" itp.) —
+			// niezależnie od tego, jak dokładnie dana praca formatuje resztę
+			// komunikatu, liczy się tylko sama kwota i etykieta XP/EXP.
+			Pattern: `Otrzymałeś (?P<amount>` + amountPattern + `)\$.*\+(?P<xp>[0-9]+) (?i:e?xp)`,
 		},
 		{
 			Name:    "Zrzucenie towaru",
@@ -230,7 +245,10 @@ func LoadOrCreateConfig(reader *bufio.Reader) (*Config, error) {
 			// Dogrywamy ewentualne nowe domyślne trackery dodane w nowszej
 			// wersji programu, żeby użytkownicy aktualizujący aplikację
 			// automatycznie dostawali nowe wykrywacze.
-			if mergeMissingDefaults(cfg) {
+			addedDefaults := mergeMissingDefaults(cfg)
+			upgradedTrackers := upgradeKnownPatterns(cfg)
+			upgradedMoneyRules := upgradeKnownMoneyRulePatterns(cfg)
+			if addedDefaults || upgradedTrackers || upgradedMoneyRules {
 				_ = cfg.Save(path)
 			}
 			return cfg, nil
@@ -261,6 +279,92 @@ func LoadOrCreateConfig(reader *bufio.Reader) (*Config, error) {
 	}
 	fmt.Printf("Zapisano konfigurację w: %s\n\n", path)
 	return cfg, nil
+}
+
+// legacyTrackerPatterns przechowuje wcześniejsze (już poprawione) wzorce
+// dla wbudowanych trackerów, zidentyfikowane po nazwie. Jeśli wzorzec
+// zapisany w config.json użytkownika jest BAJT W BAJT identyczny z jednym
+// z tych starych wzorców, upgradeKnownPatterns automatycznie podmieni go
+// na aktualny — to jedyny bezpieczny sposób na propagację poprawki błędu
+// w domyślnym wzorcu do już istniejących configów, bez ryzyka nadpisania
+// czyjejś świadomej personalizacji (nadpisujemy TYLKO przy dokładnej
+// zgodności ze starą, znaną, zepsutą wersją).
+var legacyTrackerPatterns = map[string][]string{
+	"Nagroda dzienna": {
+		`Otrzymałeś \d+(?:\.\d+)? \$ za codzienne logowanie(?:.*\(Dzień (\d+)\))?`,
+	},
+}
+
+// legacyMoneyRulePatterns to odpowiednik legacyTrackerPatterns, ale dla
+// reguł przychodów/wydatków (money_rules) — patrz komentarz przy
+// legacyTrackerPatterns po wyjaśnienie zasady działania.
+var legacyMoneyRulePatterns = map[string][]string{
+	"Zarobek (standardowy)": {
+		`Otrzymałeś (?P<amount>` + amountPattern + `)\$.*\+(?P<xp>[0-9]+) XP`,
+	},
+}
+
+// upgradeKnownMoneyRulePatterns to odpowiednik upgradeKnownPatterns, ale
+// dla reguł przychodów/wydatków (money_rules).
+func upgradeKnownMoneyRulePatterns(cfg *Config) bool {
+	changed := false
+	defaults := defaultMoneyRules()
+
+	for i, r := range cfg.MoneyRules {
+		legacyPatterns, hasLegacy := legacyMoneyRulePatterns[r.Name]
+		if !hasLegacy {
+			continue
+		}
+		isLegacy := false
+		for _, old := range legacyPatterns {
+			if r.Pattern == old {
+				isLegacy = true
+				break
+			}
+		}
+		if !isLegacy {
+			continue
+		}
+		for _, d := range defaults {
+			if d.Name == r.Name && d.Pattern != r.Pattern {
+				cfg.MoneyRules[i].Pattern = d.Pattern
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// upgradeKnownPatterns podmienia znane, historycznie zepsute wzorce
+// (patrz legacyTrackerPatterns) na aktualne domyślne. Zwraca true, jeśli
+// cokolwiek zmieniono.
+func upgradeKnownPatterns(cfg *Config) bool {
+	changed := false
+	defaults := defaultTrackers()
+
+	for i, t := range cfg.Trackers {
+		legacyPatterns, hasLegacy := legacyTrackerPatterns[t.Name]
+		if !hasLegacy {
+			continue
+		}
+		isLegacy := false
+		for _, old := range legacyPatterns {
+			if t.Pattern == old {
+				isLegacy = true
+				break
+			}
+		}
+		if !isLegacy {
+			continue
+		}
+		for _, d := range defaults {
+			if d.Name == t.Name && d.Pattern != t.Pattern {
+				cfg.Trackers[i].Pattern = d.Pattern
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 // mergeMissingDefaults dopisuje domyślne trackery i reguły
