@@ -86,11 +86,19 @@ func defaultMoneyRules() []MoneyRule {
 			// "(?i:e?xp)" obsługuje zarówno "XP" jak i "EXP" (różne prace na
 			// serwerze różnie skracają "punkty doświadczenia" — dodatkowo
 			// bez rozróżniania wielkości liter, na wypadek kolejnych
-			// wariantów), a ".*" pomiędzy kwotą a "+N XP/EXP" pozwala na
-			// dowolny tekst pomiędzy nimi (np. nawiasy, "[+46%]" itp.) —
-			// niezależnie od tego, jak dokładnie dana praca formatuje resztę
-			// komunikatu, liczy się tylko sama kwota i etykieta XP/EXP.
-			Pattern: `Otrzymałeś (?P<amount>` + amountPattern + `)\$.*\+(?P<xp>[0-9]+) (?i:e?xp)`,
+			// wariantów).
+			//
+			// Standardowy komunikat może zawierać XP/EXP:
+			// "Otrzymałeś 55.20$ [+119%] +119 XP"
+			//
+			// Przy maksymalnym XP serwer nie dopisuje jednak informacji
+			// o zdobytym XP i komunikat może wyglądać tak:
+			// "Otrzymałeś 55.20$ [+119%]"
+			//
+			// Drugi wariant regexu pozwala obsłużyć właśnie taki przypadek.
+			// Wtedy grupa "xp" nie istnieje, co jest zgodne z zasadą, że
+			// grupa XP jest opcjonalna.
+			Pattern: `Otrzymałeś (?P<amount>` + amountPattern + `)\$(?:.*\+(?P<xp>[0-9]+) (?i:e?xp)|\s+\[\+[0-9]+%\]\s*$)`,
 		},
 		{
 			Name:    "Zrzucenie towaru",
@@ -103,8 +111,8 @@ func defaultMoneyRules() []MoneyRule {
 			Pattern: `Sprzedano [0-9.,]+ kg .*? za (?P<amount>` + amountPattern + `)\$`,
 		},
 		{
-			Name:    "Tankowanie paliwa",
-			Kind:    "expense",
+			Name: "Tankowanie paliwa",
+			Kind: "expense",
 			// Nazwa paliwa (LPG, Pb 95, Pb 98, On, ...) celowo nie jest
 			// wymieniona wprost — ".+?" złapie dowolną nazwę, więc nowe
 			// rodzaje paliwa nie wymagają zmiany wzorca.
@@ -229,6 +237,7 @@ func promptForPath(reader *bufio.Reader) string {
 		}
 		return path
 	}
+
 }
 
 // LoadOrCreateConfig to główny punkt wejścia: wczytuje istniejący config,
